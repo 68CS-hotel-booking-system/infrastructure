@@ -2,7 +2,7 @@ name: hotel-booking-staging
 
 services:
   frontend:
-    image: ghcr.io/68cs-hotel-booking-system/frontend@sha256:5408c155e1d33bec6b7fdfa072ce654f1cf484a3d8e6edc272d213607e522095
+    image: ${FRONTEND_IMAGE:?Chua khai bao FRONTEND_IMAGE}
     restart: unless-stopped
 
     healthcheck:
