@@ -1,0 +1,59 @@
+name: Test VPS connection
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test-ssh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure SSH
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          : "${VPS_HOST:?Missing VPS_HOST}"
+          : "${VPS_USER:?Missing VPS_USER}"
+          : "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}"
+          : "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+
+          install -d -m 700 ~/.ssh
+
+          printf '%s\n' "$VPS_SSH_KEY" |
+            tr -d '\r' > ~/.ssh/id_ed25519
+
+          printf '%s\n' "$VPS_KNOWN_HOSTS" |
+            tr -d '\r' > ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Test SSH and Docker
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i ~/.ssh/id_ed25519 \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          whoami
+          docker ps
+          docker compose version
+          test -w /opt/hotel-booking
+          echo "SSH_DOCKER_OK"
+          REMOTE
