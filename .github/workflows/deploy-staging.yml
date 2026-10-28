@@ -62,7 +62,7 @@ jobs:
           )
 
           ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
-            'mkdir -p /opt/hotel-booking/nginx'
+            'mkdir -p /opt/hotel-booking/nginx' </dev/null
 
           scp "${ssh_options[@]}" compose.yaml \
             "$VPS_USER@$VPS_HOST:/opt/hotel-booking/"
@@ -75,14 +75,34 @@ jobs:
 
           docker compose config --quiet
           docker compose pull gateway
-          docker compose run --rm --no-deps gateway nginx -t
           docker compose up -d --wait --wait-timeout 90 gateway
 
-          docker compose exec -T gateway nginx -t
-          docker compose exec -T gateway nginx -s reload
-          docker compose exec -T gateway \
-            wget -q -O - http://127.0.0.1/healthz
+          docker compose exec -T --interactive=false \
+            gateway nginx -t </dev/null
+
+          docker compose exec -T --interactive=false \
+            gateway nginx -s reload </dev/null
 
           docker compose ps
           echo "GATEWAY_DEPLOY_OK"
           REMOTE
+
+      - name: Check public HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response="$(curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            https://staging.hotelbooking.id.vn/healthz)"
+
+          if [[ "$response" != "OK" ]]; then
+            echo "::error::HTTPS health check did not return OK."
+            exit 1
+          fi
+
+          echo "HTTPS_OK"
