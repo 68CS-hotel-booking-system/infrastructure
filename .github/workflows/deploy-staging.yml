@@ -74,8 +74,9 @@ jobs:
           cd /opt/hotel-booking
 
           docker compose config --quiet
-          docker compose pull gateway
-          docker compose up -d --wait --wait-timeout 90 gateway
+          
+          docker compose pull
+          docker compose up -d --wait --wait-timeout 120
 
           docker compose exec -T --interactive=false \
             gateway nginx -t </dev/null
@@ -106,3 +107,23 @@ jobs:
           fi
 
           echo "HTTPS_OK"
+          
+      - name: Check frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          html="$(curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            https://staging.hotelbooking.id.vn/)"
+
+          if [[ "$html" != *'id="root"'* ]]; then
+            echo "::error::Frontend HTML was not returned."
+            exit 1
+          fi
+
+          echo "FRONTEND_OK"
