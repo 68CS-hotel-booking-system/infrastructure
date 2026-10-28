@@ -1,9 +1,32 @@
 name: hotel-booking-staging
 
 services:
+  frontend:
+    image: ghcr.io/68cs-hotel-booking-system/frontend@sha256:5408c155e1d33bec6b7fdfa072ce654f1cf484a3d8e6edc272d213607e522095
+    restart: unless-stopped
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   gateway:
     image: nginx:stable-alpine
     restart: unless-stopped
+
+    depends_on:
+      frontend:
+        condition: service_healthy
 
     ports:
       - "80:80"
