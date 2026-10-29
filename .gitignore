@@ -1,0 +1,7 @@
+# VPS-only version state and runtime secrets
+images.env
+images.previous.env
+.images.*
+.env
+.env.*
+!.env.example

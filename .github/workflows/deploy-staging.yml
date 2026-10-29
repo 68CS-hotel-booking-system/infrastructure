@@ -2,6 +2,11 @@ name: Deploy staging
 
 on:
   workflow_dispatch:
+    inputs:
+      frontend_image:
+        description: "Frontend image: ghcr.io/68cs-hotel-booking-system/frontend@sha256:..."
+        type: string
+        required: false
   push:
     branches: [main]
     paths:
@@ -28,13 +33,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Deploy gateway over SSH
+      - name: Deploy frontend over SSH
         shell: bash
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          NEW_FRONTEND_IMAGE: ${{ inputs.frontend_image }}
         run: |
           set -euo pipefail
 
@@ -42,6 +48,11 @@ jobs:
           : "${VPS_USER:?Missing VPS_USER}"
           : "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}"
           : "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+
+          if [[ -n "$NEW_FRONTEND_IMAGE" ]] && [[ ! "$NEW_FRONTEND_IMAGE" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid frontend image. Use ghcr.io/68cs-hotel-booking-system/frontend@sha256:<64 lowercase hex characters>."
+            exit 1
+          fi
 
           install -d -m 700 ~/.ssh
 
@@ -70,21 +81,66 @@ jobs:
           scp "${ssh_options[@]}" nginx/default.conf \
             "$VPS_USER@$VPS_HOST:/opt/hotel-booking/nginx/"
 
-          ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          # The validated image contains no shell metacharacters; an omitted
+          # argument means keep the saved image, or discover the running one.
+          ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
+            bash -se -- "$NEW_FRONTEND_IMAGE" <<'REMOTE'
+          set -euo pipefail
           cd /opt/hotel-booking
+          new_image="${1:-}"
+          current_image=""
 
-          docker compose config --quiet
-          
-          docker compose pull
-          docker compose up -d --wait --wait-timeout 120
+          if [[ -s images.env ]]; then
+            current_image="$(sed -n 's/^FRONTEND_IMAGE=//p' images.env | tr -d '\r')"
+          else
+            frontend_id="$(docker ps -q \
+              --filter label=com.docker.compose.project=hotel-booking-staging \
+              --filter label=com.docker.compose.service=frontend)"
+            if [[ -n "$frontend_id" ]]; then
+              current_image="$(docker inspect --format '{{.Config.Image}}' "$frontend_id")"
+            fi
+          fi
 
-          docker compose exec -T --interactive=false \
+          if [[ -n "$current_image" ]] && [[ ! "$current_image" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid saved or running frontend image. Expected an image digest from this project's GHCR package."
+            exit 1
+          fi
+
+          selected_image="${new_image:-$current_image}"
+          if [[ ! "$selected_image" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
+            echo "No valid frontend image. Run this workflow with frontend_image set to a published image digest."
+            exit 1
+          fi
+
+          candidate_file="$(mktemp .images.XXXXXX)"
+          trap 'rm -f -- "$candidate_file"' EXIT
+          printf 'FRONTEND_IMAGE=%s\n' "$selected_image" > "$candidate_file"
+
+          compose() {
+            FRONTEND_IMAGE="$selected_image" docker compose --env-file "$candidate_file" "$@"
+          }
+
+          compose config --quiet
+          compose pull
+          compose up -d --wait --wait-timeout 120
+
+          compose exec -T --interactive=false \
             gateway nginx -t </dev/null
 
-          docker compose exec -T --interactive=false \
+          compose exec -T --interactive=false \
             gateway nginx -s reload </dev/null
 
-          docker compose ps
+          compose ps
+
+          # Persist only after local deployment succeeds. Public checks below
+          # still determine the final workflow result; rollback is manual.
+          if [[ -n "$current_image" && "$current_image" != "$selected_image" ]]; then
+            printf 'FRONTEND_IMAGE=%s\n' "$current_image" > images.previous.env
+          fi
+          mv -- "$candidate_file" images.env
+          trap - EXIT
+
+          printf 'FRONTEND_IMAGE=%s\n' "$selected_image"
           echo "GATEWAY_DEPLOY_OK"
           REMOTE
 
@@ -107,7 +163,7 @@ jobs:
           fi
 
           echo "HTTPS_OK"
-          
+
       - name: Check frontend
         shell: bash
         run: |
