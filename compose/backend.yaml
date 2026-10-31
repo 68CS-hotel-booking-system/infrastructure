@@ -1,0 +1,32 @@
+services:
+  backend:
+    image: ${BACKEND_IMAGE:?Missing BACKEND_IMAGE}
+    restart: unless-stopped
+
+    # Chờ database sẵn sàng trước khi chạy backend.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      SERVER_PORT: "8080"
+      SPRING_PROFILES_ACTIVE: staging
+
+      # postgres là tên service trong mạng Docker.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?Missing POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?Missing POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Missing POSTGRES_PASSWORD}
+      SPRING_FLYWAY_ENABLED: "true"
+
+      AUTH_JWT_SECRET_BASE64: ${AUTH_JWT_SECRET_BASE64:?Missing AUTH_JWT_SECRET_BASE64}
+      AUTH_VERIFICATION_URL: ${AUTH_VERIFICATION_URL:?Missing AUTH_VERIFICATION_URL}
+      AUTH_MAIL_FROM: ${AUTH_MAIL_FROM:?Missing AUTH_MAIL_FROM}
+
+      MAIL_HOST: ${MAIL_HOST:?Missing MAIL_HOST}
+      MAIL_PORT: "${MAIL_PORT:?Missing MAIL_PORT}"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

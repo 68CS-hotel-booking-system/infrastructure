@@ -1,0 +1,19 @@
+services:
+  frontend:
+    image: ${FRONTEND_IMAGE:?Chua khai bao FRONTEND_IMAGE}
+    restart: unless-stopped
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,41 @@
+name: Validate infrastructure
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/deploy.sh
+          bash -n scripts/health-check.sh
+
+      - name: Validate staging configuration
+        shell: bash
+        env:
+          FRONTEND_IMAGE: ghcr.io/68cs-hotel-booking-system/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BACKEND_IMAGE: ghcr.io/68cs-hotel-booking-system/backend-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          POSTGRES_PASSWORD: validation-only
+          AUTH_JWT_SECRET_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+        run: |
+          set -euo pipefail
+          docker compose \
+            --env-file environments/staging/.env.example \
+            config --quiet

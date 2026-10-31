@@ -1,0 +1,20 @@
+services:
+  gateway:
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - type: bind
+        source: ./nginx/staging.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: /etc/hotelbooking/tls
+        target: /etc/nginx/tls
+        read_only: true
+        bind:
+          create_host_path: false

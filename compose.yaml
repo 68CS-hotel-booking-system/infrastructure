@@ -1,63 +1,11 @@
+# Staging entry point. Resolve every bind mount from the repository root.
 name: hotel-booking-staging
 
-services:
-  frontend:
-    image: ${FRONTEND_IMAGE:?Chua khai bao FRONTEND_IMAGE}
-    restart: unless-stopped
-
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  gateway:
-    image: nginx:stable-alpine
-    restart: unless-stopped
-
-    depends_on:
-      frontend:
-        condition: service_healthy
-
-    ports:
-      - "80:80"
-      - "443:443"
-
-    volumes:
-      - type: bind
-        source: ./nginx
-        target: /etc/nginx/conf.d
-        read_only: true
-        bind:
-          create_host_path: false
-
-      - type: bind
-        source: /etc/hotelbooking/tls
-        target: /etc/nginx/tls
-        read_only: true
-        bind:
-          create_host_path: false
-
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1/healthz || exit 1
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+include:
+  - path:
+      - ./compose/postgres.yaml
+      - ./compose/backend.yaml
+      - ./compose/frontend.yaml
+      - ./compose/gateway.yaml
+      - ./environments/staging/compose.override.yaml
+    project_directory: .

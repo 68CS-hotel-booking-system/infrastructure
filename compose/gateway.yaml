@@ -1,0 +1,29 @@
+services:
+  gateway:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+    # Gateway healthy khi chính nó và backend đều sẵn sàng.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -T 3 -O /dev/null http://127.0.0.1/healthz &&
+          wget -q -T 3 -O - http://backend:8080/actuator/health |
+          grep -Eq '"status"[[:space:]]*:[[:space:]]*"UP"'
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

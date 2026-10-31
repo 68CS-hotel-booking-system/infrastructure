@@ -1,22 +1,36 @@
 name: Deploy staging
 
+# Chạy thủ công hoặc khi cấu hình staging thay đổi trên main.
 on:
   workflow_dispatch:
     inputs:
       frontend_image:
-        description: "Frontend image: ghcr.io/68cs-hotel-booking-system/frontend@sha256:..."
+        description: "Frontend image kèm SHA-256 digest; bỏ trống để giữ phiên bản cũ"
+        type: string
+        required: false
+      backend_image:
+        description: "Backend image kèm SHA-256 digest; bỏ trống để giữ phiên bản cũ"
         type: string
         required: false
   push:
     branches: [main]
     paths:
       - compose.yaml
-      - nginx/**
+      - compose/**
+      - nginx/staging.conf
+      - environments/staging/**
+      - scripts/*.sh
       - .github/workflows/deploy-staging.yml
 
+# Workflow chỉ cần đọc source.
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+# Mỗi thời điểm chạy một deployment staging, không hủy lần đang chạy.
 concurrency:
   group: hotel-booking-staging
   cancel-in-progress: false
@@ -28,40 +42,61 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # 1. Lấy source infra.
       - name: Checkout infrastructure
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Deploy frontend over SSH
-        shell: bash
+      # 2. Kiểm tra cú pháp và Compose bằng giá trị mẫu, không chạy container.
+      - name: Validate staging configuration
+        env:
+          FRONTEND_IMAGE: ghcr.io/68cs-hotel-booking-system/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BACKEND_IMAGE: ghcr.io/68cs-hotel-booking-system/backend-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          POSTGRES_PASSWORD: validation-only
+          AUTH_JWT_SECRET_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+        run: |
+          set -euo pipefail
+          bash -n scripts/deploy.sh
+          bash -n scripts/health-check.sh
+          docker compose --env-file environments/staging/.env.example config --quiet
+
+      # 3. Chuẩn bị SSH, chuyển cấu hình và gọi script deploy trên VPS.
+      - name: Deploy staging over SSH
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           NEW_FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+          NEW_BACKEND_IMAGE: ${{ inputs.backend_image }}
         run: |
           set -euo pipefail
 
-          : "${VPS_HOST:?Missing VPS_HOST}"
-          : "${VPS_USER:?Missing VPS_USER}"
-          : "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}"
-          : "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+          # Kiểm tra các secret kết nối bắt buộc.
+          : "${VPS_HOST:?Missing VPS_HOST}" \
+            "${VPS_USER:?Missing VPS_USER}" \
+            "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}" \
+            "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
 
-          if [[ -n "$NEW_FRONTEND_IMAGE" ]] && [[ ! "$NEW_FRONTEND_IMAGE" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Invalid frontend image. Use ghcr.io/68cs-hotel-booking-system/frontend@sha256:<64 lowercase hex characters>."
+          # Kiểm tra input trước khi ghép vào lệnh SSH.
+          frontend_pattern='^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$'
+          backend_pattern='^ghcr\.io/68cs-hotel-booking-system/backend-api@sha256:[0-9a-f]{64}$'
+
+          if [[ -n "$NEW_FRONTEND_IMAGE" && ! "$NEW_FRONTEND_IMAGE" =~ $frontend_pattern ]]; then
+            echo "::error::Invalid frontend image digest."
             exit 1
           fi
 
+          if [[ -n "$NEW_BACKEND_IMAGE" && ! "$NEW_BACKEND_IMAGE" =~ $backend_pattern ]]; then
+            echo "::error::Invalid backend image digest."
+            exit 1
+          fi
+
+          # Tạo key và danh sách host đã xác minh trên runner.
           install -d -m 700 ~/.ssh
-
-          printf '%s\n' "$VPS_SSH_KEY" |
-            tr -d '\r' > ~/.ssh/id_ed25519
-
-          printf '%s\n' "$VPS_KNOWN_HOSTS" |
-            tr -d '\r' > ~/.ssh/known_hosts
-
+          printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
           ssh_options=(
@@ -71,115 +106,24 @@ jobs:
             -o StrictHostKeyChecking=yes
             -o ConnectTimeout=15
           )
+          target="${VPS_USER}@${VPS_HOST}"
 
-          ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
-            'mkdir -p /opt/hotel-booking/nginx' </dev/null
+          # Gửi cấu hình; ghi đè tại chỗ để bind mount Nginx nhận file mới.
+          tar -czf - \
+            compose.yaml \
+            compose/ \
+            nginx/staging.conf \
+            environments/staging/compose.override.yaml \
+            scripts/deploy.sh \
+            scripts/health-check.sh |
+            ssh "${ssh_options[@]}" "$target" \
+              'mkdir -p /opt/hotel-booking && tar --overwrite -xzf - -C /opt/hotel-booking'
 
-          scp "${ssh_options[@]}" compose.yaml \
-            "$VPS_USER@$VPS_HOST:/opt/hotel-booking/"
+          # Giữ đúng vị trí tham số khi một trong hai input rỗng.
+          ssh "${ssh_options[@]}" "$target" \
+            "bash /opt/hotel-booking/scripts/deploy.sh staging '$NEW_FRONTEND_IMAGE' '$NEW_BACKEND_IMAGE'" \
+            </dev/null
 
-          scp "${ssh_options[@]}" nginx/default.conf \
-            "$VPS_USER@$VPS_HOST:/opt/hotel-booking/nginx/"
-
-          # The validated image contains no shell metacharacters; an omitted
-          # argument means keep the saved image, or discover the running one.
-          ssh "${ssh_options[@]}" "$VPS_USER@$VPS_HOST" \
-            bash -se -- "$NEW_FRONTEND_IMAGE" <<'REMOTE'
-          set -euo pipefail
-          cd /opt/hotel-booking
-          new_image="${1:-}"
-          current_image=""
-
-          if [[ -s images.env ]]; then
-            current_image="$(sed -n 's/^FRONTEND_IMAGE=//p' images.env | tr -d '\r')"
-          else
-            frontend_id="$(docker ps -q \
-              --filter label=com.docker.compose.project=hotel-booking-staging \
-              --filter label=com.docker.compose.service=frontend)"
-            if [[ -n "$frontend_id" ]]; then
-              current_image="$(docker inspect --format '{{.Config.Image}}' "$frontend_id")"
-            fi
-          fi
-
-          if [[ -n "$current_image" ]] && [[ ! "$current_image" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
-            echo "Invalid saved or running frontend image. Expected an image digest from this project's GHCR package."
-            exit 1
-          fi
-
-          selected_image="${new_image:-$current_image}"
-          if [[ ! "$selected_image" =~ ^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$ ]]; then
-            echo "No valid frontend image. Run this workflow with frontend_image set to a published image digest."
-            exit 1
-          fi
-
-          candidate_file="$(mktemp .images.XXXXXX)"
-          trap 'rm -f -- "$candidate_file"' EXIT
-          printf 'FRONTEND_IMAGE=%s\n' "$selected_image" > "$candidate_file"
-
-          compose() {
-            FRONTEND_IMAGE="$selected_image" docker compose --env-file "$candidate_file" "$@"
-          }
-
-          compose config --quiet
-          compose pull
-          compose up -d --wait --wait-timeout 120
-
-          compose exec -T --interactive=false \
-            gateway nginx -t </dev/null
-
-          compose exec -T --interactive=false \
-            gateway nginx -s reload </dev/null
-
-          compose ps
-
-          # Persist only after local deployment succeeds. Public checks below
-          # still determine the final workflow result; rollback is manual.
-          if [[ -n "$current_image" && "$current_image" != "$selected_image" ]]; then
-            printf 'FRONTEND_IMAGE=%s\n' "$current_image" > images.previous.env
-          fi
-          mv -- "$candidate_file" images.env
-          trap - EXIT
-
-          printf 'FRONTEND_IMAGE=%s\n' "$selected_image"
-          echo "GATEWAY_DEPLOY_OK"
-          REMOTE
-
-      - name: Check public HTTPS
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          response="$(curl --fail --silent --show-error \
-            --connect-timeout 10 \
-            --max-time 20 \
-            --retry 5 \
-            --retry-delay 3 \
-            --retry-all-errors \
-            https://staging.hotelbooking.id.vn/healthz)"
-
-          if [[ "$response" != "OK" ]]; then
-            echo "::error::HTTPS health check did not return OK."
-            exit 1
-          fi
-
-          echo "HTTPS_OK"
-
-      - name: Check frontend
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          html="$(curl --fail --silent --show-error \
-            --connect-timeout 10 \
-            --max-time 20 \
-            --retry 5 \
-            --retry-delay 3 \
-            --retry-all-errors \
-            https://staging.hotelbooking.id.vn/)"
-
-          if [[ "$html" != *'id="root"'* ]]; then
-            echo "::error::Frontend HTML was not returned."
-            exit 1
-          fi
-
-          echo "FRONTEND_OK"
+      # 4. Kiểm tra HTTPS, frontend và backend qua domain công khai.
+      - name: Check staging health
+        run: bash scripts/health-check.sh staging
