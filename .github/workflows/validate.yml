@@ -18,16 +18,18 @@ jobs:
       - name: Checkout infrastructure
         uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Check shell syntax
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/deploy.sh
-          bash -n scripts/health-check.sh
+          for file in scripts/*.sh; do
+            bash -n "$file"
+          done
 
-      - name: Validate staging configuration
+      - name: Validate application and gateway configuration
         shell: bash
         env:
           FRONTEND_IMAGE: ghcr.io/68cs-hotel-booking-system/frontend@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -36,6 +38,69 @@ jobs:
           AUTH_JWT_SECRET_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
         run: |
           set -euo pipefail
-          docker compose \
-            --env-file environments/staging/.env.example \
-            config --quiet
+          # Resolve đúng profile và env của từng môi trường.
+          for environment in staging production; do
+            profile=staging
+            if [[ "$environment" == production ]]; then profile=prod; fi
+            DEPLOY_ENVIRONMENT="$environment" SPRING_PROFILES_ACTIVE="$profile" \
+              docker compose --file compose.app.yaml \
+                --env-file "environments/$environment/.env.example" config --quiet
+          done
+
+          # Đường dẫn mount của gateway tính từ gốc repo.
+          docker compose --project-directory "$GITHUB_WORKSPACE" \
+            --file compose/gateway.shared.yaml config --quiet
+
+      # Release đã lưu trên nhánh đích phải được giữ nguyên.
+      - name: Validate release files
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # Lấy thay đổi release của PR; rename được tính thành xóa và thêm.
+          git diff --name-status --no-renames "$BASE_SHA"...HEAD \
+            -- 'releases/*.json' > release-changes.txt
+
+          while IFS=$'\t' read -r status file; do
+            [[ -n "$status" ]] || continue
+
+            # Chỉ cho thêm release mới, chặn sửa/xóa release đã có.
+            if [[ "$status" != A ]]; then
+              echo "::error::Existing release cannot be changed: $file"
+              exit 1
+            fi
+
+            # Tên file phải chứa release ID hợp lệ.
+            [[ "$file" =~ ^releases/v[0-9][0-9A-Za-z._-]*\.json$ ]]
+            release_id="${file#releases/}"
+            release_id="${release_id%.json}"
+
+            # Kiểm tra ID, hai digest và metadata nguồn.
+            jq -e --arg id "$release_id" '
+              .schemaVersion == 1 and
+              .releaseId == $id and
+              .environment == "staging" and
+              (.deploymentRunId | test("^[0-9]+$")) and
+              (.frontend.image |
+                test("^ghcr\\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$")) and
+              (.backend.image |
+                test("^ghcr\\.io/68cs-hotel-booking-system/backend-api@sha256:[0-9a-f]{64}$")) and
+              ([.frontend.commit, .frontend.sourceTree,
+                .backend.commit, .backend.sourceTree] |
+                all(.[]; test("^[0-9a-f]{40}$")))
+            ' "$file" > /dev/null
+          done < release-changes.txt
+
+          # Release được production chọn phải tồn tại và đúng ID.
+          pointer="environments/production/release.json"
+          if [[ -f "$pointer" ]]; then
+            release_id="$(jq -er '.releaseId' "$pointer")"
+            [[ "$release_id" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]
+
+            jq -e --arg id "$release_id" \
+              '.releaseId == $id' \
+              "releases/$release_id.json" > /dev/null
+          fi

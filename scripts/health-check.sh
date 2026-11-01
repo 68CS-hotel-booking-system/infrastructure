@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Chọn domain theo môi trường; mặc định là staging.
 environment="${1:-staging}"
-if [[ "$environment" != "staging" ]]; then
-  echo "Only staging is configured. Usage: bash scripts/health-check.sh staging" >&2
-  exit 1
-fi
 
-base_url="https://staging.hotelbooking.id.vn"
+case "$environment" in
+  staging)
+    base_url="https://staging.hotelbooking.id.vn"
+    ;;
+  production)
+    base_url="https://hotelbooking.id.vn"
+    ;;
+  *)
+    echo "Usage: bash scripts/health-check.sh staging|production" >&2
+    exit 1
+    ;;
+esac
 curl_options=(
   --fail --silent --show-error
   --connect-timeout 10
   --max-time 20
-  --retry 5
+  --retry 20
   --retry-delay 3
   --retry-all-errors
 )

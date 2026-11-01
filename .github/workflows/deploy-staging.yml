@@ -15,9 +15,10 @@ on:
   push:
     branches: [main]
     paths:
-      - compose.yaml
-      - compose/**
-      - nginx/staging.conf
+      - compose.app.yaml
+      - compose/backend.yaml
+      - compose/frontend.yaml
+      - compose/postgres.yaml
       - environments/staging/**
       - scripts/*.sh
       - .github/workflows/deploy-staging.yml
@@ -34,12 +35,13 @@ defaults:
 concurrency:
   group: hotel-booking-staging
   cancel-in-progress: false
+  queue: max
 
 jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       # 1. Lấy source infra.
@@ -55,14 +57,20 @@ jobs:
           BACKEND_IMAGE: ghcr.io/68cs-hotel-booking-system/backend-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
           POSTGRES_PASSWORD: validation-only
           AUTH_JWT_SECRET_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+          DEPLOY_ENVIRONMENT: staging
+          SPRING_PROFILES_ACTIVE: staging
         run: |
           set -euo pipefail
           bash -n scripts/deploy.sh
           bash -n scripts/health-check.sh
-          docker compose --env-file environments/staging/.env.example config --quiet
+          bash -n scripts/snapshot-release.sh
+          docker compose \
+            --file compose.app.yaml \
+            --env-file environments/staging/.env.example \
+            config --quiet
 
-      # 3. Chuẩn bị SSH, chuyển cấu hình và gọi script deploy trên VPS.
-      - name: Deploy staging over SSH
+      # 3. Dùng chung SSH/deploy/health/snapshot với production.
+      - name: Deploy staging and capture release snapshot
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -71,59 +79,17 @@ jobs:
           NEW_FRONTEND_IMAGE: ${{ inputs.frontend_image }}
           NEW_BACKEND_IMAGE: ${{ inputs.backend_image }}
         run: |
-          set -euo pipefail
+          bash scripts/remote-deploy.sh staging "$NEW_FRONTEND_IMAGE" "$NEW_BACKEND_IMAGE"
 
-          # Kiểm tra các secret kết nối bắt buộc.
-          : "${VPS_HOST:?Missing VPS_HOST}" \
-            "${VPS_USER:?Missing VPS_USER}" \
-            "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}" \
-            "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
-
-          # Kiểm tra input trước khi ghép vào lệnh SSH.
-          frontend_pattern='^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$'
-          backend_pattern='^ghcr\.io/68cs-hotel-booking-system/backend-api@sha256:[0-9a-f]{64}$'
-
-          if [[ -n "$NEW_FRONTEND_IMAGE" && ! "$NEW_FRONTEND_IMAGE" =~ $frontend_pattern ]]; then
-            echo "::error::Invalid frontend image digest."
-            exit 1
-          fi
-
-          if [[ -n "$NEW_BACKEND_IMAGE" && ! "$NEW_BACKEND_IMAGE" =~ $backend_pattern ]]; then
-            echo "::error::Invalid backend image digest."
-            exit 1
-          fi
-
-          # Tạo key và danh sách host đã xác minh trên runner.
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
-          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-
-          ssh_options=(
-            -i "$HOME/.ssh/id_ed25519"
-            -o BatchMode=yes
-            -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes
-            -o ConnectTimeout=15
-          )
-          target="${VPS_USER}@${VPS_HOST}"
-
-          # Gửi cấu hình; ghi đè tại chỗ để bind mount Nginx nhận file mới.
-          tar -czf - \
-            compose.yaml \
-            compose/ \
-            nginx/staging.conf \
-            environments/staging/compose.override.yaml \
-            scripts/deploy.sh \
-            scripts/health-check.sh |
-            ssh "${ssh_options[@]}" "$target" \
-              'mkdir -p /opt/hotel-booking && tar --overwrite -xzf - -C /opt/hotel-booking'
-
-          # Giữ đúng vị trí tham số khi một trong hai input rỗng.
-          ssh "${ssh_options[@]}" "$target" \
-            "bash /opt/hotel-booking/scripts/deploy.sh staging '$NEW_FRONTEND_IMAGE' '$NEW_BACKEND_IMAGE'" \
-            </dev/null
-
-      # 4. Kiểm tra HTTPS, frontend và backend qua domain công khai.
-      - name: Check staging health
-        run: bash scripts/health-check.sh staging
+      # 4. Giữ snapshot riêng cho mỗi deployment để Prepare release chọn lại.
+      - name: Upload staging release snapshot
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: staging-release
+          path: deployed-release.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Show QA deployment ID
+        run: |
+          jq . deployed-release.json
+          printf 'QA deployment ID: %s\n' "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"

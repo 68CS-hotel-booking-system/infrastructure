@@ -1,0 +1,63 @@
+# Project riêng, dùng chung cho staging và production.
+name: hotel-booking-gateway
+
+services:
+  gateway:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+
+    # Gateway là nơi tiếp nhận HTTP/HTTPS từ bên ngoài.
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # Thay default.conf có sẵn trong image bằng cấu hình staging.
+      - type: bind
+        source: ./nginx/staging.edge.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # Cấu hình domain production trên cùng gateway.
+      - type: bind
+        source: ./nginx/production/default.conf
+        target: /etc/nginx/conf.d/production.conf
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # Chứng chỉ và private key được lưu riêng trên VPS.
+      - type: bind
+        source: /etc/hotelbooking/tls
+        target: /etc/nginx/tls
+        read_only: true
+        bind:
+          create_host_path: false
+
+    # Kết nối tới FE/BE của hai môi trường qua alias riêng.
+    networks:
+      - edge
+
+    # Health của gateway; health ứng dụng được workflow kiểm tra riêng.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -T 3 -O /dev/null http://127.0.0.1/healthz
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Network dùng chung giữa các project Compose.
+networks:
+  edge:
+    external: true
+    name: hotel-booking-edge

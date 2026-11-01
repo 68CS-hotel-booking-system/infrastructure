@@ -1,0 +1,49 @@
+# Tách project theo môi trường, đồng thời giữ tên staging hiện tại.
+name: hotel-booking-${DEPLOY_ENVIRONMENT:?Missing DEPLOY_ENVIRONMENT}
+
+services:
+  # Dùng lại cấu hình PostgreSQL, kết nối mạng riêng của project.
+  postgres:
+    extends:
+      file: ./compose/postgres.yaml
+      service: postgres
+
+  # Dùng lại cấu hình backend và chọn Spring profile theo môi trường.
+  backend:
+    extends:
+      file: ./compose/backend.yaml
+      service: backend
+
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:?Missing SPRING_PROFILES_ACTIVE}
+
+    networks:
+      default:
+      edge:
+        aliases:
+          - ${DEPLOY_ENVIRONMENT}-backend
+
+  # Frontend dùng alias riêng để gateway định tuyến chính xác.
+  frontend:
+    extends:
+      file: ./compose/frontend.yaml
+      service: frontend
+
+    networks:
+      default:
+      edge:
+        aliases:
+          - ${DEPLOY_ENVIRONMENT}-frontend
+
+# Volume được đặt tên theo project, tách dữ liệu hai môi trường.
+volumes:
+  postgres_data:
+
+networks:
+  # Mạng riêng cho các service trong cùng môi trường.
+  default:
+
+  # Mạng kết nối FE/BE với gateway chung.
+  edge:
+    external: true
+    name: hotel-booking-edge

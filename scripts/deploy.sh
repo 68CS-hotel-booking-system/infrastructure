@@ -6,63 +6,107 @@ environment="${1:-staging}"
 frontend_image="${2:-}"
 backend_image="${3:-}"
 
-if [[ "$environment" != "staging" ]]; then
-  echo "Usage: bash scripts/deploy.sh staging [frontend_image] [backend_image]" >&2
+# Chọn profile; production bắt buộc nhận đủ cặp image từ release.
+case "$environment" in
+  staging)
+    profile=staging
+    ;;
+  production)
+    profile=prod
+    : "${frontend_image:?Production requires frontend image}"
+    : "${backend_image:?Production requires backend image}"
+    ;;
+  *)
+    echo "Usage: deploy.sh staging|production [frontend] [backend]" >&2
+    exit 1
+    ;;
+esac
+
+# Source nằm theo vị trí script; cấu hình runtime nằm cố định trên VPS.
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+runtime_root="${HOTEL_RUNTIME_ROOT:-/opt/hotel-booking}"
+state_dir="$runtime_root/environments/$environment"
+image_file="$state_dir/images.env"
+
+if [[ ! -s "$state_dir/.env" ]]; then
+  echo "Missing runtime configuration: $state_dir/.env" >&2
   exit 1
 fi
 
-# Tính mọi đường dẫn từ thư mục gốc repo.
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd -- "$repo_root"
-state_dir="environments/$environment"
-image_file="$state_dir/images.env"
+if [[ ! -f "$repo_root/compose.app.yaml" ]]; then
+  echo "Missing compose.app.yaml" >&2
+  exit 1
+fi
 
-# Không truyền image mới thì dùng phiên bản đang lưu.
-if [[ -s "$image_file" ]]; then
+# Staging được giữ image của thành phần không có bản cập nhật.
+if [[ "$environment" == staging && -s "$image_file" ]]; then
   frontend_image="${frontend_image:-$(sed -n 's/^FRONTEND_IMAGE=//p' "$image_file" | tr -d '\r')}"
   backend_image="${backend_image:-$(sed -n 's/^BACKEND_IMAGE=//p' "$image_file" | tr -d '\r')}"
 fi
 
-# Staging chạy cả frontend và backend, nên cần hai digest hợp lệ.
+# Kiểm tra đúng repository và registry digest.
 frontend_pattern='^ghcr\.io/68cs-hotel-booking-system/frontend@sha256:[0-9a-f]{64}$'
 backend_pattern='^ghcr\.io/68cs-hotel-booking-system/backend-api@sha256:[0-9a-f]{64}$'
 
 if [[ ! "$frontend_image" =~ $frontend_pattern ]]; then
-  echo "Supply a valid frontend image digest, or save it in $image_file." >&2
+  echo "Invalid or missing frontend image digest." >&2
   exit 1
 fi
 
 if [[ ! "$backend_image" =~ $backend_pattern ]]; then
-  echo "Supply a valid backend image digest, or save it in $image_file." >&2
+  echo "Invalid or missing backend image digest." >&2
   exit 1
 fi
 
-# Dùng file tạm để giữ nguyên phiên bản đang lưu nếu deploy thất bại.
-mkdir -p -- "$state_dir"
+# Gateway chung và network phải được chuẩn bị trước khi deploy ứng dụng.
+if ! docker network inspect hotel-booking-edge > /dev/null 2>&1; then
+  echo "Missing shared network: hotel-booking-edge" >&2
+  exit 1
+fi
+
+gateway_id="$(docker ps -q \
+  --filter label=com.docker.compose.project=hotel-booking-gateway \
+  --filter label=com.docker.compose.service=gateway \
+  --filter health=healthy)"
+
+if [[ -z "$gateway_id" || "$gateway_id" == *$'\n'* ]]; then
+  echo "Expected one healthy shared gateway." >&2
+  exit 1
+fi
+
+# Chuẩn bị file image tạm; chưa thay images.env đang lưu.
 candidate_file="$(mktemp "$state_dir/.images.XXXXXX")"
 trap 'rm -f -- "$candidate_file"' EXIT
+
 printf 'FRONTEND_IMAGE=%s\nBACKEND_IMAGE=%s\n' \
   "$frontend_image" "$backend_image" > "$candidate_file"
 
-# Nạp cấu hình runtime bắt buộc và hai phiên bản đã chọn.
+# Tách project và profile; giữ đúng tên project staging hiện tại.
 compose() {
-  FRONTEND_IMAGE="$frontend_image" BACKEND_IMAGE="$backend_image" \
-    docker compose --project-directory "$repo_root" \
-      --file "$repo_root/compose.yaml" \
-      --env-file "$state_dir/.env" --env-file "$candidate_file" "$@"
+  DEPLOY_ENVIRONMENT="$environment" \
+  SPRING_PROFILES_ACTIVE="$profile" \
+  FRONTEND_IMAGE="$frontend_image" \
+  BACKEND_IMAGE="$backend_image" \
+    docker compose \
+      --project-name "hotel-booking-$environment" \
+      --project-directory "$repo_root" \
+      --file "$repo_root/compose.app.yaml" \
+      --env-file "$state_dir/.env" \
+      --env-file "$candidate_file" "$@"
 }
 
-# Compose gốc đã include đủ bốn service; kiểm tra trước khi thay container.
+# Kiểm tra cấu hình, tải image và cập nhật container ứng dụng.
 compose config --quiet
-
-# Pull, chạy container và kiểm tra/reload Nginx.
 compose pull
-compose up -d --wait --wait-timeout 120
-compose exec -T --interactive=false gateway nginx -t </dev/null
-compose exec -T --interactive=false gateway nginx -s reload </dev/null
+compose up -d --wait --wait-timeout 180
 
-# Chỉ lưu phiên bản sau khi các bước nội bộ thành công.
+# Kiểm tra qua domain trước khi ghi nhận phiên bản thành công.
+bash "$repo_root/scripts/health-check.sh" "$environment"
+
 mv -- "$candidate_file" "$image_file"
 trap - EXIT
-printf 'FRONTEND_IMAGE=%s\nBACKEND_IMAGE=%s\n' "$frontend_image" "$backend_image"
-echo "GATEWAY_DEPLOY_OK"
+
+printf 'FRONTEND_IMAGE=%s\nBACKEND_IMAGE=%s\n' \
+  "$frontend_image" "$backend_image"
+
+echo "DEPLOY_OK: $environment"

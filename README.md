@@ -1,199 +1,160 @@
 # Hạ tầng Hotel Booking
 
-Staging: https://staging.hotelbooking.id.vn/
+Cấu hình cho staging.hotelbooking.id.vn và hotelbooking.id.vn trên cùng VPS,
+một gateway chung và hai bộ FE/BE/PostgreSQL riêng. File nguồn đã cấu hình không
+đồng nghĩa với VPS đã chuyển sang kiến trúc mới.
 
-## Cấu trúc hiện tại
+## Luồng phát hành
 
-```text
-infrastructure/
-├── compose.yaml                    # Ghép bốn service và override staging
-├── compose/
-│   ├── postgres.yaml               # Database, volume dữ liệu, health check
-│   ├── backend.yaml                # Image backend, env và kết nối database
-│   ├── frontend.yaml               # Image frontend, health check và log
-│   └── gateway.yaml                # Nginx, dependency và health check backend
-├── environments/
-│   ├── staging/
-│   │   ├── .env.example            # Mẫu biến runtime, được lưu trong Git
-│   │   ├── compose.override.yaml   # Cổng public và mount Nginx/TLS
-│   │   ├── .env                    # Chỉ trên VPS: DB/JWT/mail thực tế
-│   │   └── images.env              # Chỉ trên VPS: hai image đang được chọn
-│   └── production/.gitkeep
-├── nginx/
-│   ├── staging.conf                # HTTPS, proxy frontend/API và health
-│   └── production/.gitkeep
-├── scripts/
-│   ├── deploy.sh                   # Chọn image, validate, pull/up và lưu phiên bản
-│   ├── health-check.sh             # Kiểm tra HTTPS, HTML frontend và backend UP
-│   └── rollback/.gitkeep
-└── .github/workflows/
-    ├── validate.yml
-    ├── test-vps.yml
-    ├── deploy-staging.yml
-    └── production/.gitkeep
-```
+1. feature → PR develop: CI verify; sau merge develop, build/smoke/publish image,
+   gọi Deploy staging trong infra.
+2. Deploy staging health đạt → ghi state.json trên VPS và artifact staging-release.
+3. QA kiểm thử đúng deployment, ghi RUN ID.
+4. develop → staging ở hai repo ứng dụng; chờ CI push của cả hai staging đạt.
+5. Prepare release nhận release ID mới và RUN ID QA, xác minh sourceTree/CI rồi
+   mở PR chứa releases/<id>.json và environments/production/release.json.
+6. Review/merge PR infra; staging → main ở FE/BE bằng merge commit, không squash.
+7. Sau toàn bộ CI main thành công, mỗi ứng dụng gửi tín hiệu kiểm tra sang infra.
+8. Cả hai main phải khớp sourceTree trong release và CI đạt. Required reviewer
+   duyệt job production; job kiểm tra lại lựa chọn release/main/CI rồi deploy
+   chính cặp digest đã duyệt, không build lại.
 
-`.gitignore` bỏ qua secret và phiên bản runtime. `.gitattributes` giữ LF cho
-Bash/YAML/Nginx. Production và script rollback còn là thư mục giữ chỗ.
+Nhánh staging là bước chốt code; môi trường staging vẫn tự cập nhật từ develop.
+Image có SHA tag để tra cứu; deploy dùng registry digest. Merge commit đổi SHA
+nhưng sourceTree có thể giữ nguyên. Không chọn lại image mới nhất khi phát hành.
 
-Compose project giữ tên `hotel-booking-staging`. Mọi đường dẫn mount tương đối
-được tính từ thư mục gốc repo. Chỉ gateway publish cổng 80/443; PostgreSQL và
-backend giao tiếp trong mạng Docker.
+## File và trách nhiệm
 
-Backend chờ PostgreSQL healthy. Gateway chờ frontend healthy và backend started,
-sau đó health check của gateway kiểm tra cả `/healthz` và backend trả status UP.
-Backend không có health check riêng bên trong image Java. Nginx chuyển `/api/`
-và `/actuator/health` tới backend:8080, trang web tới frontend:80.
-
-## Vai trò các workflow
-
-| Workflow | Khi nào chạy | Kiểm tra/thao tác |
-| --- | --- | --- |
-| `validate.yml` | PR, push main hoặc thủ công | Cú pháp Bash và Compose với giá trị mẫu; không chạy container |
-| `test-vps.yml` | Thủ công | SSH, tài khoản đăng nhập, Docker, phiên bản Compose và quyền ghi /opt/hotel-booking |
-| `deploy-staging.yml` | Thay đổi cấu hình trên main hoặc thủ công | Validate, chuyển cấu hình, deploy và kiểm tra domain công khai |
-
-`test-vps.yml` không thay đổi container, không kiểm tra secret runtime, chứng chỉ
-TLS, quyền pull GHCR hoặc chức năng ứng dụng. Dòng `SSH_DOCKER_OK` chỉ xác nhận
-những kiểm tra kết nối/quyền Docker trong workflow đã qua.
-
-## Chuẩn bị VPS trước lần deploy đầu
-
-VPS dùng Ubuntu; runner GitHub Actions dùng Ubuntu 24.04. Tài khoản `deploy` cần:
-
-- Dùng được Docker Engine và Docker Compose hỗ trợ `include`.
-- Ghi được vào `/opt/hotel-booking` và các thư mục runtime bên dưới.
-- Đăng nhập GHCR với quyền pull cả package frontend và backend nếu chúng private.
-- Có TLS tại `/etc/hotelbooking/tls/staging.pem` và `staging.key`.
-- Domain staging trỏ tới VPS; nếu qua Cloudflare, cấu hình Full (strict).
-
-Tạo repository secrets trong repo infrastructure:
-
-| Secret | Nội dung |
+| File | Trách nhiệm |
 | --- | --- |
-| `VPS_HOST` | IP hoặc hostname VPS |
-| `VPS_USER` | Tài khoản deploy |
-| `VPS_SSH_KEY` | Private key SSH của tài khoản deploy |
-| `VPS_KNOWN_HOSTS` | Host key đã xác minh, khớp VPS_HOST |
+| compose.app.yaml | Ba service ứng dụng, profile và alias theo môi trường |
+| compose/{postgres,backend,frontend}.yaml | Cấu hình service tái sử dụng |
+| compose/gateway.shared.yaml | Gateway project riêng, duy nhất mở 80/443 |
+| nginx/staging.edge.conf, nginx/production/default.conf | Hai virtual host và Docker DNS |
+| scripts/deploy.sh | Chọn image, validate, pull/up, public health, lưu images.env |
+| scripts/remote-deploy.sh | SSH từ runner, gửi source theo env/infra SHA, health/snapshot |
+| scripts/snapshot-release.sh | Lấy metadata từ container thực tế, ghi state.json |
+| scripts/check-release.sh | Xác minh sourceTree và CI staging/main của cả FE/BE |
+| scripts/check-production-selection.sh | Chặn release lỗi thời và thiếu reviewer |
+| .github/workflows/validate.yml | Bash/Compose và bảo vệ release đã có |
+| .github/workflows/deploy-staging.yml | Deploy staging, lưu artifact QA |
+| .github/workflows/prepare-release.yaml | Chốt snapshot thành PR release |
+| .github/workflows/deploy-production.yml | Chờ nguồn/CI/reviewer, deploy production |
+| .github/workflows/test-vps.yml | Kiểm tra SSH/Docker cơ bản, không deploy |
 
-Trên VPS, dùng tài khoản deploy tạo file runtime dựa theo
-`environments/staging/.env.example` trong repo:
+compose.yaml, compose/gateway.yaml, environments/staging/compose.override.yaml
+và nginx/staging.conf là entry point/cấu hình cũ, giữ lại phục vụ chuyển đổi.
+Các workflow deploy mới dùng compose.app.yaml. Không xóa volume khi chuyển.
 
-```bash
-cd /opt/hotel-booking
-mkdir -p environments/staging
-umask 077
-nano environments/staging/.env
-```
+## State và source trên VPS
 
-Điền đủ biến PostgreSQL, JWT và mail. Có thể tạo mật khẩu DB bằng
-`openssl rand -hex 24` và khóa JWT bằng `openssl rand -base64 32` cho lần thiết lập
-đầu. Giữ các giá trị này giữa các lần deploy. File thật không được commit hoặc
-chuyển từ runner bằng gói cấu hình.
+    /opt/hotel-booking/
+      gateway/                         source/mount của gateway chung
+      deployments/
+        staging/<infra-sha>/           source ứng dụng cho staging
+        production/<infra-sha>/        source ứng dụng cho production
+      environments/
+        staging/{.env,images.env,state.json}
+        production/{.env,images.env,state.json}
 
-`MAIL_HOST=localhost` và `MAIL_PORT=1025` trong mẫu chỉ phục vụ khởi tạo ứng dụng;
-chưa có SMTP tại địa chỉ đó để gửi email. Khi làm luồng email, dùng cấu hình SMTP
-thực tế và URL xác minh khớp frontend.
+Staging giữ project name hotel-booking-staging để tiếp tục dùng volume
+hotel-booking-staging_postgres_data. Production dùng hotel-booking-production,
+volume và default network riêng. Chỉ FE/BE nối thêm hotel-booking-edge; PostgreSQL
+không nối mạng edge. Trên cùng VPS, hai môi trường vẫn chia sẻ CPU/RAM.
 
-Chuẩn bị cả hai digest trong `environments/staging/images.env` trên VPS, hoặc
-truyền cả hai input ở lần deploy đầu. Định dạng được chấp nhận:
+.env là secret runtime. images.env là lựa chọn image sau public health từ VPS.
+state.json được ghi sau public health từ runner; artifact theo RUN ID là snapshot
+QA dùng cho Prepare release. Run thất bại không đủ điều kiện để tạo release.
+releases/*.json được lưu trong Git và không được sửa/xóa sau khi đã vào main.
 
-```dotenv
-FRONTEND_IMAGE=ghcr.io/68cs-hotel-booking-system/frontend@sha256:<64 lowercase hex characters>
-BACKEND_IMAGE=ghcr.io/68cs-hotel-booking-system/backend-api@sha256:<64 lowercase hex characters>
-```
+## GitHub cần cấu hình
 
-Nếu còn file images.env ở gốc VPS theo cấu trúc cũ, chuyển dữ liệu sang vị trí
-mới một lần và bổ sung backend digest. Script không tự đọc file cũ hoặc dò
-container đang chạy.
+Trong FE/BE: INFRA_DISPATCH_TOKEN, fine-grained PAT có Actions read/write trên
+repo infrastructure. Không dùng token này cho GHCR hoặc đặt trong VITE_*.
 
-Chuẩn bị runtime trước khi merge cấu hình vào main, vì push main có thể tự
-kích hoạt deploy. Chạy `test-vps.yml` thủ công để kiểm tra SSH/Docker trước.
+Trong infra:
 
-## Luồng deploy chính
+| Secret | Quyền/nội dung |
+| --- | --- |
+| VPS_HOST / VPS_USER | SSH target của VPS |
+| VPS_SSH_KEY / VPS_KNOWN_HOSTS | Private key và host key đã xác minh |
+| APP_READ_TOKEN | Contents read + Actions read trên frontend và backend-api |
 
-1. Nhận `frontend_image` và `backend_image`; image không được truyền thì dùng giá trị
-   đang lưu trong `environments/staging/images.env`.
-2. Kiểm tra digest và Compose với `.env` runtime cùng file image tạm.
-3. Pull image, chạy Compose và chờ trạng thái running/healthy.
-4. Kiểm tra/reload Nginx, rồi lưu hai phiên bản vào `images.env`.
-5. Runner kiểm tra HTTPS, HTML frontend và backend health qua domain staging.
+Prepare release dùng GITHUB_TOKEN của chính infra với Contents write,
+Pull requests write, Actions read. Bật Settings → Actions → General →
+Allow GitHub Actions to create and approve pull requests. Workflow chỉ tạo PR,
+không approve hoặc merge PR. Nếu PR của bot hiện Approve workflows to run,
+người có quyền write cần phê duyệt việc chạy CI.
 
-Workflow dùng tar với danh sách cấu hình cần chuyển, không gửi `.env` hoặc
-`images.env` runtime. Giải nén dùng `--overwrite` để cập nhật file tại chỗ,
-giữ inode của file Nginx đang được bind mount vào gateway.
+Bảo vệ main infra: require PR, một review, check validate; không force push,
+không xóa nhánh, không bypass các check. FE/BE giữ quy tắc PR
+develop → staging → main và required check verify tương ứng.
 
-File tạm bảo vệ thông tin phiên bản nếu các bước nội bộ thất bại; không tự
-hoàn tác container hoặc migration đã chạy. Public health check diễn ra sau khi
-lưu phiên bản. Chưa có rollback/backup tự động.
+Trong infra tạo environment production, required reviewer và giới hạn branch
+main. Reviewers phụ thuộc loại repo/gói GitHub; workflow kiểm tra cấu hình
+reviewer qua API và sẽ từ chối deploy nếu thiếu.
 
-Lần deploy thành công có đủ:
+Production mặc định tắt. Sau khi VPS/TLS/runtime/reviewer đã được chuẩn bị,
+tạo Repository Actions variable:
 
-```text
-GATEWAY_DEPLOY_OK
-HTTPS_OK
-FRONTEND_OK
-BACKEND_OK
-```
+    PRODUCTION_DEPLOY_ENABLED=true
 
-## Kiểm tra trên VPS
+Nếu chưa có biến này, workflow ghi Production disabled và không deploy.
+APP_READ_TOKEN là repository secret để cả job check và job deploy đọc được.
+Có thể đặt SSH secrets riêng trong environment production.
 
-Các lệnh Compose phải nạp cả runtime và image:
+## Chuẩn bị/chuyển VPS
 
-```bash
-cd /opt/hotel-booking
+Thực hiện thứ tự trong docs/vps-shared-gateway.md TRƯỚC khi push/merge cấu hình
+deploy mới vào main infra. Gateway staging hiện tại đang giữ 80/443; cần một
+khoảng bảo trì ngắn để chuyển sang gateway chung. Production chỉ bật sau khi
+staging đã vận hành tốt với cấu hình mới.
 
-docker compose \
-  --env-file environments/staging/.env \
-  --env-file environments/staging/images.env \
-  ps
+Yêu cầu: Docker/Compose, curl, jq, quyền ghi /opt/hotel-booking, pull được cả hai
+package GHCR, hai domain trỏ đúng VPS, TLS cho từng domain. Giữ DB/user/password
+staging hiện tại. .env.example không chứa secret thực tế.
 
-docker compose \
-  --env-file environments/staging/.env \
-  --env-file environments/staging/images.env \
-  logs --tail=50 postgres backend frontend gateway
+SMTP mẫu chưa phải dịch vụ mail đang hoạt động. Backend Compose hiện truyền
+host/port; SMTP auth/STARTTLS cần cấu hình tương ứng với nhà cung cấp trước QA mail.
 
-bash scripts/health-check.sh staging
-```
+## Sử dụng sau khi chuyển đổi
 
-`health-check.sh` cần curl và jq khi chạy trực tiếp trên VPS.
+Deploy staging: Actions → Deploy staging, main, tùy chọn frontend_image và
+backend_image. Bỏ trống một thành phần để giữ image đang lưu. Lần đầu cần đủ hai
+digest hoặc images.env đã có cặp hợp lệ. Cả hai image phải đã rebuild với label
+io.hotelbooking.source-tree. Giá trị label thiếu/sai sẽ chặn snapshot.
 
-Chạy deploy trực tiếp nếu cần:
+Sau QA và CI staging của cả hai repo đạt:
+Actions → Prepare release → main → release_id (ví dụ v0.1.0) và staging_run_id.
+Workflow tạo PR, không dùng state staging mới nhất. Nếu develop/staging có code
+chưa test, không gộp code đó rồi tái sử dụng kết quả QA cũ.
 
-```bash
-# Dùng lại cả hai phiên bản đang lưu.
-bash scripts/deploy.sh staging
+Sau PR release được merge và hai CI main đạt, Deploy production được gọi tự động.
+Có thể chạy thủ công để kiểm tra lại. WAIT/Skipped không có nghĩa production đã
+deploy. Hai callback FE/BE có thể tạo hai run cùng release; có thể hủy run trùng
+đang chờ. Workflow production xếp tuần tự và chặn request chọn release cũ khi
+main infra đã chọn bản khác. Sau reviewer, source/CI/selection được kiểm tra lại.
 
-# Chỉ cập nhật backend, giữ frontend.
-bash scripts/deploy.sh staging "" "$BACKEND_IMAGE"
+Public health thành công xác nhận HTTPS, HTML FE và Actuator UP; vẫn cần QA
+đăng ký/xác minh/login và các chức năng nghiệp vụ đã triển khai.
 
-# Cập nhật cả hai.
-bash scripts/deploy.sh staging "$FRONTEND_IMAGE" "$BACKEND_IMAGE"
-```
+## Kiểm tra local
 
-## Nối CI ứng dụng với infra
+Trong PowerShell Windows, dùng Git Bash đã tìm được jq:
 
-Trong repo frontend/backend, credential gọi repo infra được lưu bằng secret
-`INFRA_DISPATCH_TOKEN`, có quyền Actions read/write trên repo infrastructure.
-Credential dispatch khác credential GHCR của tài khoản deploy trên VPS.
+    & "C:\Program Files\Git\bin\bash.exe" -n scripts/deploy.sh
+    & "C:\Program Files\Git\bin\bash.exe" scripts/health-check.sh staging
 
-Sau publish, caller truyền image kèm digest sang workflow infra:
+Lệnh bash mặc định có thể là WSL launcher, dùng môi trường khác với jq Windows.
+Workflow validate nạp env mẫu và giá trị kiểm tra để chạy Compose config; không
+khởi động container, không kiểm tra certificate thực tế.
 
-```bash
-# Caller frontend.
-gh workflow run deploy-staging.yml \
-  --repo 68CS-hotel-booking-system/infrastructure \
-  --ref main \
-  -f frontend_image="$FRONTEND_IMAGE"
+## Giới hạn vận hành
 
-# Caller backend.
-gh workflow run deploy-staging.yml \
-  --repo 68CS-hotel-booking-system/infrastructure \
-  --ref main \
-  -f backend_image="$BACKEND_IMAGE"
-```
+Không có rollback/backup DB tự động hoặc deploy zero downtime. Compose up có thể
+đã thay container/migration trước khi health thất bại; file state thành công không
+tự hoàn tác chúng. Quay lại image cần kiểm tra tương thích schema; không tự restore
+DB vì có thể mất dữ liệu mới phát sinh. Giữ các image đã phát hành trong GHCR.
 
-Job gọi workflow thành công chỉ xác nhận yêu cầu đã gửi. Xem lần chạy trong
-repo infrastructure để biết kết quả deploy. Khi cần quay lại phiên bản trước,
-lấy digest từ release.json của bản phát hành rồi chạy workflow với input đó;
-việc quay lại image không tự hoàn tác database migration.
+Không sửa migration đã áp dụng; thêm migration mới và kiểm tra nâng cấp DB có dữ
+liệu trước production. Chưa có workflow rollback hoặc tự dọn deployments/.

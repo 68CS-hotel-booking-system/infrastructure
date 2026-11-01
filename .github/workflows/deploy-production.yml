@@ -1,0 +1,138 @@
+name: Deploy production
+
+# PR release chọn phiên bản; CI main FE/BE gửi tín hiệu kiểm tra lại.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - environments/production/release.json
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+# Xếp tuần tự cả quá trình kiểm tra, chờ reviewer và deploy production.
+concurrency:
+  group: hotel-booking-production
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.ready.outputs.ready }}
+      release_path: ${{ steps.candidate.outputs.release_path }}
+      release_id: ${{ steps.candidate.outputs.release_id }}
+    steps:
+      # Pin source của cả workflow vào commit infra của run này.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check production activation and approved selection
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENABLED: ${{ vars.PRODUCTION_DEPLOY_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$ENABLED" != true ]]; then
+            echo "Production disabled. Configure VPS/reviewers, then set PRODUCTION_DEPLOY_ENABLED=true." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ ! -f environments/production/release.json ]]; then
+            echo "Waiting for an approved release PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          id="$(jq -er .releaseId environments/production/release.json)"
+          [[ "$id" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]
+          file="releases/$id.json"
+          if bash scripts/check-production-selection.sh "$file"; then
+            printf 'release_path=%s\nrelease_id=%s\ncandidate=true\n' "$file" "$id" \
+              >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" != 2 ]]; then exit "$status"; fi
+            echo "Skipping an outdated production request." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Cả hai nhánh main phải khớp sourceTree và CI push mới nhất đã đạt.
+      - name: Check both application main branches
+        id: ready
+        if: steps.candidate.outputs.candidate == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.APP_READ_TOKEN }}
+          RELEASE_PATH: ${{ steps.candidate.outputs.release_path }}
+        run: |
+          set -euo pipefail
+          if bash scripts/check-release.sh "$RELEASE_PATH" main; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" != 2 ]]; then exit "$status"; fi
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo "Waiting for matching source and successful CI on both application main branches." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    name: Deploy approved release
+    needs: check
+    if: needs.check.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://hotelbooking.id.vn
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Chạy lại sau khi reviewer duyệt, tránh phát hành yêu cầu đã lỗi thời.
+      - name: Recheck selected release and reviewer configuration
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PATH: ${{ needs.check.outputs.release_path }}
+        run: bash scripts/check-production-selection.sh "$RELEASE_PATH"
+
+      - name: Recheck both application main branches
+        env:
+          GH_TOKEN: ${{ secrets.APP_READ_TOKEN }}
+          RELEASE_PATH: ${{ needs.check.outputs.release_path }}
+        run: bash scripts/check-release.sh "$RELEASE_PATH" main
+
+      # Không build image hoặc nhận digest tùy ý từ dispatch.
+      - name: Deploy the approved image pair
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          RELEASE_PATH: ${{ needs.check.outputs.release_path }}
+          RELEASE_ID: ${{ needs.check.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          frontend="$(jq -er .frontend.image "$RELEASE_PATH")"
+          backend="$(jq -er .backend.image "$RELEASE_PATH")"
+          bash scripts/remote-deploy.sh production "$frontend" "$backend"
+          jq --arg releaseId "$RELEASE_ID" \
+            '. + {releaseId: $releaseId}' deployed-release.json > production-deployment.json
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: production-deployment
+          path: production-deployment.json
+          if-no-files-found: error
+          retention-days: 90

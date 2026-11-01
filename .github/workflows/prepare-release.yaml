@@ -1,0 +1,135 @@
+name: Prepare release
+
+# Người phụ trách chọn đúng deployment đã được QA kiểm thử.
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "ID mới, ví dụ v0.1.0"
+        required: true
+        type: string
+      staging_run_id:
+        description: "Run ID của Deploy staging đã được QA test"
+        required: true
+        type: string
+
+# Quyền của GITHUB_TOKEN trong chính repo infra.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+
+    steps:
+      # 1. Lấy source infra và giữ credentials để push branch release.
+      - name: Checkout infrastructure
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: true
+
+      # 2. Xác minh run thành công rồi tải đúng snapshot của run đó.
+      - name: Download staging snapshot
+        run: |
+          set -euo pipefail
+
+          [[ "$RELEASE_ID" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]
+          [[ "$STAGING_RUN_ID" =~ ^[0-9]+$ ]]
+          git check-ref-format --branch "release/$RELEASE_ID"
+          test ! -e "releases/$RELEASE_ID.json"
+
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$STAGING_RUN_ID" \
+            > run-info.json
+
+          workflow_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml" \
+            --jq .id)"
+
+          jq -e --argjson workflowId "$workflow_id" '
+            .workflow_id == $workflowId and
+            .head_branch == "main" and
+            .conclusion == "success"
+          ' run-info.json > /dev/null
+
+          gh run download "$STAGING_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name staging-release \
+            --dir downloaded-snapshot
+
+          jq -e \
+            --arg runId "$STAGING_RUN_ID" \
+            --arg infraCommit "$(jq -r .head_sha run-info.json)" '
+              .deploymentRunId == $runId and
+              .infraCommit == $infraCommit
+            ' downloaded-snapshot/deployed-release.json > /dev/null
+
+      # 3. Đọc hai repo ứng dụng bằng token read-only đã cấu hình.
+      - name: Verify application staging branches
+        env:
+          GH_TOKEN: ${{ secrets.APP_READ_TOKEN }}
+        run: |
+          bash scripts/check-release.sh \
+            downloaded-snapshot/deployed-release.json staging
+
+      # 4. Lưu cặp image cố định và mở PR để nhóm review.
+      - name: Create release pull request
+        run: |
+          set -euo pipefail
+
+          branch="release/$RELEASE_ID"
+          git switch -c "$branch"
+          mkdir -p releases environments/production
+
+          jq --arg releaseId "$RELEASE_ID" \
+            '. + {releaseId: $releaseId}' \
+            downloaded-snapshot/deployed-release.json \
+            > "releases/$RELEASE_ID.json"
+
+          jq -n --arg releaseId "$RELEASE_ID" \
+            '{releaseId: $releaseId}' \
+            > environments/production/release.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- \
+            "releases/$RELEASE_ID.json" \
+            environments/production/release.json
+
+          git commit -m "release: prepare $RELEASE_ID"
+          git push origin "$branch"
+
+          printf 'Release: %s\n\nStaging deployment: %s\n' \
+            "$RELEASE_ID" "$STAGING_RUN_ID" > release-pr-body.md
+
+          cat "releases/$RELEASE_ID.json" >> release-pr-body.md
+
+          pr_url="$(gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --title "release: $RELEASE_ID" \
+            --body-file release-pr-body.md)"
+
+          printf 'Release PR: %s\n' "$pr_url" >> "$GITHUB_STEP_SUMMARY"

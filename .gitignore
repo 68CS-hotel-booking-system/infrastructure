@@ -5,3 +5,13 @@ images.previous.env
 .env
 .env.*
 !.env.example
+
+# Snapshot runtime và đầu ra tạm của Actions; releases/*.json vẫn được commit.
+state.json
+.state.*
+deployed-release.json
+production-deployment.json
+downloaded-snapshot/
+run-info.json
+release-pr-body.md
+release-changes.txt
