@@ -25,6 +25,11 @@ services:
 
       MAIL_HOST: ${MAIL_HOST:?Missing MAIL_HOST}
       MAIL_PORT: "${MAIL_PORT:?Missing MAIL_PORT}"
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_SMTP_AUTH: "${MAIL_SMTP_AUTH:-false}"
+      MAIL_STARTTLS_ENABLE: "${MAIL_STARTTLS_ENABLE:-false}"
+      MAIL_STARTTLS_REQUIRED: "${MAIL_STARTTLS_REQUIRED:-false}"
 
     logging:
       driver: json-file
