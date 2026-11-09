@@ -31,6 +31,12 @@ services:
       MAIL_STARTTLS_ENABLE: "${MAIL_STARTTLS_ENABLE:-false}"
       MAIL_STARTTLS_REQUIRED: "${MAIL_STARTTLS_REQUIRED:-false}"
 
+      R2_ENABLED: "${R2_ENABLED:-false}"
+      R2_ENDPOINT: "${R2_ENDPOINT:-}"
+      R2_ACCESS_KEY_ID: "${R2_ACCESS_KEY_ID:-}"
+      R2_SECRET_ACCESS_KEY: "${R2_SECRET_ACCESS_KEY:-}"
+      R2_BUCKET: "${R2_BUCKET:-}"
+
     logging:
       driver: json-file
       options:
