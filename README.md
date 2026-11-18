@@ -117,6 +117,9 @@ staging hiện tại. .env.example không chứa secret thực tế.
 SMTP mẫu chưa phải dịch vụ mail đang hoạt động. Backend Compose hiện truyền
 host/port; SMTP auth/STARTTLS cần cấu hình tương ứng với nhà cung cấp trước QA mail.
 
+[Test VNPAY sandbox trên staging](docs/vnpay-staging.md): cấu hình runtime trên VPS,
+truyền env vào container, triển khai FE/BE, chuyển IPN từ ngrok và kiểm tra giao dịch.
+
 ## Sử dụng sau khi chuyển đổi
 
 Deploy staging: Actions → Deploy staging, main, tùy chọn frontend_image và
