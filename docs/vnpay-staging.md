@@ -106,8 +106,8 @@ Invoke-RestMethod -Uri "https://staging.hotelbooking.id.vn/api/v1/payments/vnpay
 
 1. Mở <https://staging.hotelbooking.id.vn>, đăng ký/xác minh email hoặc dùng tài khoản test đã xác minh trong **database staging**. Tài khoản local không tự xuất hiện ở staging.
 2. Chuẩn bị một khách sạn ACTIVE đang mở bán, hạng phòng/phòng vật lý và giá/tồn khả dụng cho ngày tương lai. Dữ liệu demo của profile `dev` không tự seed trên staging.
-3. Tạo booking, xác nhận thông tin liên hệ, bấm thanh toán VNPAY trước hạn giữ phòng.
-4. Chọn thẻ nội địa/ngân hàng NCB và dùng thẻ sandbox:
+3. Tạo booking, xác nhận thông tin liên hệ, bấm thanh toán VNPAY trước hạn giữ phòng. Bản hỗ trợ Merchant hosted QR sẽ hiển thị QR ngay trên website, số tiền/hạn thanh toán và tự cập nhật kết quả nhận từ backend. Cần triển khai backend có migration `qr_content` trước frontend này; merchant phải hỗ trợ API sinh QR.
+4. Để test QR sandbox, dùng công cụ/ứng dụng thử nghiệm do VNPAY cung cấp. Nếu muốn tiếp tục test bằng thẻ NCB, bấm **Mở cổng thanh toán VNPAY**, chọn thẻ nội địa/ngân hàng NCB và dùng thẻ sandbox:
 
    | Trường | Giá trị |
    | --- | --- |
