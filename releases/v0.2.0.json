@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "environment": "staging",
+  "deploymentRunId": "44428196979",
+  "infraCommit": "71831000d414ab07c8a2de2dd4ce485d0f946cbd",
+  "deploymentUrl": "https://github.com/68CS-hotel-booking-system/infrastructure/actions/runs/44428196979",
+  "frontend": {
+    "image": "ghcr.io/68cs-hotel-booking-system/frontend@sha256:00ea1f27a92dd55da875202f8eeedfe508c53384c7e8870b3e3e3a63ce4e1043",
+    "commit": "ab4533b36baee6458ba93c424dc2e02b26b05ed8",
+    "sourceTree": "713c86030fc66866514394d54d13b034ea73bd5a"
+  },
+  "backend": {
+    "image": "ghcr.io/68cs-hotel-booking-system/backend-api@sha256:385274ac165f73954173387acf7c122e8d23347bb6c38f89eae379f2b260fd3c",
+    "commit": "e79aab9f4b8e328e6cbeb5c2bc5bdd492b0222fe",
+    "sourceTree": "39e3de7de321239994891e37afd988f7e9e45732"
+  },
+  "releaseId": "v0.2.0"
+}
