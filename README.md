@@ -34,7 +34,7 @@ nhưng sourceTree có thể giữ nguyên. Không chọn lại image mới nhấ
 | scripts/deploy.sh | Chọn image, validate, pull/up, public health, lưu images.env |
 | scripts/remote-deploy.sh | SSH từ runner, gửi source theo env/infra SHA, health/snapshot |
 | scripts/snapshot-release.sh | Lấy metadata từ container thực tế, ghi state.json |
-| scripts/check-release.sh | Xác minh sourceTree và CI staging/main của cả FE/BE |
+| scripts/check-release.sh | Xác minh nguồn gốc image từ CI producer, sourceTree và CI staging/main của cả FE/BE |
 | scripts/check-production-selection.sh | Chặn release lỗi thời và thiếu reviewer |
 | .github/workflows/validate.yml | Bash/Compose và bảo vệ release đã có |
 | .github/workflows/deploy-staging.yml | Deploy staging, lưu artifact QA |
