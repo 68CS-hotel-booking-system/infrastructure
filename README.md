@@ -34,7 +34,7 @@ nhưng sourceTree có thể giữ nguyên. Không chọn lại image mới nhấ
 | scripts/deploy.sh | Chọn image, validate, pull/up, public health, lưu images.env |
 | scripts/remote-deploy.sh | SSH từ runner, gửi source theo env/infra SHA, health/snapshot |
 | scripts/snapshot-release.sh | Lấy metadata từ container thực tế, ghi state.json |
-| scripts/check-release.sh | Xác minh sourceTree và CI staging/main của cả FE/BE |
+| scripts/check-release.sh | Xác minh nguồn gốc image từ CI producer, sourceTree và CI staging/main của cả FE/BE |
 | scripts/check-production-selection.sh | Chặn release lỗi thời và thiếu reviewer |
 | .github/workflows/validate.yml | Bash/Compose và bảo vệ release đã có |
 | .github/workflows/deploy-staging.yml | Deploy staging, lưu artifact QA |
@@ -74,11 +74,13 @@ repo infrastructure. Không dùng token này cho GHCR hoặc đặt trong VITE_*
 
 Trong infra:
 
-| Secret | Quyền/nội dung |
-| --- | --- |
-| VPS_HOST / VPS_USER | SSH target của VPS |
-| VPS_SSH_KEY / VPS_KNOWN_HOSTS | Private key và host key đã xác minh |
-| APP_READ_TOKEN | Contents read + Actions read trên frontend và backend-api |
+| Secret | Phạm vi | Quyền/nội dung |
+| --- | --- | --- |
+| VPS_HOST / VPS_USER | Repository (staging) | SSH target của tài khoản deploy staging |
+| VPS_SSH_KEY / VPS_KNOWN_HOSTS | Repository (staging) | Private key staging và host key đã xác minh |
+| PRODUCTION_VPS_HOST / PRODUCTION_VPS_USER | Environment `production` (chỉ đặt ở scope environment) | SSH target của tài khoản deploy production riêng |
+| PRODUCTION_VPS_SSH_KEY / PRODUCTION_VPS_KNOWN_HOSTS | Environment `production` (chỉ đặt ở scope environment) | Private key production riêng và host key đã xác minh |
+| APP_READ_TOKEN | Repository | Contents read + Actions read trên frontend và backend-api |
 
 Prepare release dùng GITHUB_TOKEN của chính infra với Contents write,
 Pull requests write, Actions read. Bật Settings → Actions → General →
@@ -101,7 +103,40 @@ tạo Repository Actions variable:
 
 Nếu chưa có biến này, workflow ghi Production disabled và không deploy.
 APP_READ_TOKEN là repository secret để cả job check và job deploy đọc được.
-Có thể đặt SSH secrets riêng trong environment production.
+
+### Tách ranh giới SSH giữa staging và production
+
+- Bộ secret `PRODUCTION_VPS_*` CHỈ được khai báo trong GitHub Environment `production`
+  (không khai báo ở mức repository). `deploy-production.yml` và `scripts/remote-deploy.sh`
+  không bao giờ fallback sang `VPS_*`; workflow sẽ dừng ngay nếu thiếu bất kỳ secret
+  `PRODUCTION_VPS_*` nào hoặc nếu `PRODUCTION_VPS_USER@PRODUCTION_VPS_HOST` trùng với
+  `VPS_USER@VPS_HOST` của staging.
+- Dùng cặp khóa SSH riêng và tài khoản OS riêng không phải `root` cho mỗi môi trường
+  (ví dụ `deploy-staging` và `deploy-production`), hoặc tách riêng VPS cho production.
+- **Giới hạn quyền Docker/OS:** Nếu hai tài khoản OS trên cùng VPS đều nằm trong cùng
+  nhóm `docker` (rootful daemon), cả hai đều có quyền tương đương root đối với mọi
+  container — tài khoản staging vẫn có thể thao tác workload `hotel-booking-production`.
+  Để tạo ranh giới thực sự, cần chọn một trong các biện pháp sau:
+  1. Tách riêng VPS cho staging và production (khuyến nghị).
+  2. Chạy rootless Docker daemon riêng theo từng user OS và tách quyền sở hữu thư mục
+     `/opt/hotel-booking/{deployments,environments}/{staging,production}` (`chmod 700`).
+  3. Giới hạn từng khóa trong `~/.ssh/authorized_keys` bằng `forced-command`
+     (`command="/usr/local/sbin/hotel-deploy-wrapper staging",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty`)
+     chỉ cho phép wrapper thực thi các thao tác Compose/thư mục của đúng môi trường tương ứng.
+- **Cách kiểm toán fingerprint và quyền (không xuất private key):**
+
+      # 1. Đối chiếu SHA256 fingerprint khóa công khai của hai user phải khác nhau
+      sudo ssh-keygen -lf /home/deploy-staging/.ssh/authorized_keys
+      sudo ssh-keygen -lf /home/deploy-production/.ssh/authorized_keys
+
+      # 2. Kiểm tra tùy chọn forced-command/forwarding trong authorized_keys
+      sudo grep -v '^[[:space:]]*#' /home/deploy-staging/.ssh/authorized_keys | cut -d' ' -f1-2
+      sudo grep -v '^[[:space:]]*#' /home/deploy-production/.ssh/authorized_keys | cut -d' ' -f1-2
+
+      # 3. Kiểm tra nhóm OS, sudo và quyền thư mục từng môi trường
+      id deploy-staging && sudo -l -U deploy-staging
+      id deploy-production && sudo -l -U deploy-production
+      ls -ld /opt/hotel-booking/environments/staging /opt/hotel-booking/environments/production
 
 ## Chuẩn bị/chuyển VPS
 

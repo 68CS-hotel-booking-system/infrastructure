@@ -69,7 +69,7 @@ jobs:
             --env-file environments/staging/.env.example \
             config --quiet
 
-      # 3. Dùng chung SSH/deploy/health/snapshot với production.
+      # 3. Dùng bộ SSH secret riêng của staging; chỉ dùng chung script deploy/health/snapshot.
       - name: Deploy staging and capture release snapshot
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
