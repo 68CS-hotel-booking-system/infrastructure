@@ -5,9 +5,49 @@ set -euo pipefail
 environment="${1:?Missing environment}"
 frontend_image="${2:-}"
 backend_image="${3:-}"
-[[ "$environment" == staging || "$environment" == production ]]
-: "${VPS_HOST:?Missing VPS_HOST}" "${VPS_USER:?Missing VPS_USER}" \
-  "${VPS_SSH_KEY:?Missing VPS_SSH_KEY}" "${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+
+# Tách biệt hoàn toàn biến SSH giữa staging và production, tránh fallback im lặng.
+case "$environment" in
+  staging)
+    if [[ -n "${PRODUCTION_VPS_HOST:-}" || -n "${PRODUCTION_VPS_USER:-}" || \
+          -n "${PRODUCTION_VPS_SSH_KEY:-}" || -n "${PRODUCTION_VPS_KNOWN_HOSTS:-}" ]]; then
+      echo "ERROR: Production SSH secrets must not be passed to a staging deployment." >&2
+      exit 1
+    fi
+    ssh_host="${VPS_HOST:?Missing VPS_HOST}"
+    ssh_user="${VPS_USER:?Missing VPS_USER}"
+    ssh_key="${VPS_SSH_KEY:?Missing VPS_SSH_KEY}"
+    ssh_known_hosts="${VPS_KNOWN_HOSTS:?Missing VPS_KNOWN_HOSTS}"
+    ;;
+  production)
+    if [[ -n "${VPS_HOST:-}" || -n "${VPS_USER:-}" || \
+          -n "${VPS_SSH_KEY:-}" || -n "${VPS_KNOWN_HOSTS:-}" ]]; then
+      echo "ERROR: Staging VPS_* secrets must not be passed to a production deployment." >&2
+      exit 1
+    fi
+    ssh_host="${PRODUCTION_VPS_HOST:?Missing PRODUCTION_VPS_HOST in production environment}"
+    ssh_user="${PRODUCTION_VPS_USER:?Missing PRODUCTION_VPS_USER in production environment}"
+    ssh_key="${PRODUCTION_VPS_SSH_KEY:?Missing PRODUCTION_VPS_SSH_KEY in production environment}"
+    ssh_known_hosts="${PRODUCTION_VPS_KNOWN_HOSTS:?Missing PRODUCTION_VPS_KNOWN_HOSTS in production environment}"
+
+    # Chặn dùng chung cùng user@host với staging nếu workflow cung cấp tham chiếu staging.
+    if [[ -n "${STAGING_SSH_HOST_REF:-}" && -n "${STAGING_SSH_USER_REF:-}" && \
+          "$ssh_host" == "$STAGING_SSH_HOST_REF" && "$ssh_user" == "$STAGING_SSH_USER_REF" ]]; then
+      echo "ERROR: Production SSH target must not reuse the staging user@host; configure a dedicated production OS user or separate VPS." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: remote-deploy.sh staging|production [frontend] [backend]" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$ssh_host" =~ [[:space:]] || "$ssh_user" =~ [[:space:]] ]]; then
+  echo "ERROR: SSH host and user must not contain whitespace." >&2
+  exit 1
+fi
+
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
 [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
 
@@ -27,14 +67,15 @@ if [[ "$environment" == production ]]; then
   : "${backend_image:?Production requires backend image}"
 fi
 
-# Key chỉ tồn tại trên runner, không gửi cùng source.
+# Key chỉ tồn tại trên runner, không gửi cùng source và dọn dẹp khi kết thúc.
 install -d -m 700 "$HOME/.ssh"
-printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > "$HOME/.ssh/id_ed25519"
-printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > "$HOME/.ssh/known_hosts"
+trap 'rm -f -- "$HOME/.ssh/id_ed25519"' EXIT
+printf '%s\n' "$ssh_key" | tr -d '\r' > "$HOME/.ssh/id_ed25519"
+printf '%s\n' "$ssh_known_hosts" | tr -d '\r' > "$HOME/.ssh/known_hosts"
 chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 ssh_options=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes
   -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
-target="$VPS_USER@$VPS_HOST"
+target="$ssh_user@$ssh_host"
 
 # Source tách theo env/infra commit; runtime và gateway không bị ghi đè.
 remote_dir="/opt/hotel-booking/deployments/$environment/$GITHUB_SHA"

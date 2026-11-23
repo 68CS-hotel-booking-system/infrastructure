@@ -114,16 +114,23 @@ jobs:
         run: bash scripts/check-release.sh "$RELEASE_PATH" main
 
       # Không build image hoặc nhận digest tùy ý từ dispatch.
+      # Chỉ dùng bộ secret PRODUCTION_VPS_* khai báo riêng trong environment production.
       - name: Deploy the approved image pair
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          PRODUCTION_VPS_HOST: ${{ secrets.PRODUCTION_VPS_HOST }}
+          PRODUCTION_VPS_USER: ${{ secrets.PRODUCTION_VPS_USER }}
+          PRODUCTION_VPS_SSH_KEY: ${{ secrets.PRODUCTION_VPS_SSH_KEY }}
+          PRODUCTION_VPS_KNOWN_HOSTS: ${{ secrets.PRODUCTION_VPS_KNOWN_HOSTS }}
+          STAGING_SSH_HOST_REF: ${{ secrets.VPS_HOST }}
+          STAGING_SSH_USER_REF: ${{ secrets.VPS_USER }}
           RELEASE_PATH: ${{ needs.check.outputs.release_path }}
           RELEASE_ID: ${{ needs.check.outputs.release_id }}
         run: |
           set -euo pipefail
+          : "${PRODUCTION_VPS_HOST:?Missing PRODUCTION_VPS_HOST in production environment}"
+          : "${PRODUCTION_VPS_USER:?Missing PRODUCTION_VPS_USER in production environment}"
+          : "${PRODUCTION_VPS_SSH_KEY:?Missing PRODUCTION_VPS_SSH_KEY in production environment}"
+          : "${PRODUCTION_VPS_KNOWN_HOSTS:?Missing PRODUCTION_VPS_KNOWN_HOSTS in production environment}"
           frontend="$(jq -er .frontend.image "$RELEASE_PATH")"
           backend="$(jq -er .backend.image "$RELEASE_PATH")"
           bash scripts/remote-deploy.sh production "$frontend" "$backend"
